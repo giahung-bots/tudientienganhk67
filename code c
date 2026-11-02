@@ -1,0 +1,963 @@
+/*
+ * ============================================================
+ *  TỪ ĐIỂN ANH - VIỆT ĐA NĂNG  (bản C, chạy trên màn hình console)
+ *  Chuyển từ file index.html sang C, giữ đầy đủ chức năng:
+ *    1. Tra từ (Anh->Việt hoặc Việt->Anh, không cần gõ dấu)
+ *    2. Thẻ từ (flashcard)       3. Đố vui (trắc nghiệm)
+ *    4. Từ đã lưu (yêu thích)    5. Lịch sử tra cứu
+ *    6. Quản trị (thêm / xóa / khôi phục từ)  - mật khẩu: admin123
+ *    + Lọc theo chủ đề, đổi giao diện sáng/tối, đọc phát âm
+ *    + Dữ liệu được lưu vào file, lần sau mở lại vẫn còn
+ *
+ *  Biên dịch:   gcc tudien.c -o tudien
+ *  Chạy:        ./tudien        (Windows: tudien.exe)
+ * ============================================================
+ */
+
+#include <stdio.h>    // printf, fgets, fopen...
+#include <stdlib.h>   // rand, srand, system, exit
+#include <string.h>   // strcmp, strlen, strstr...
+#include <ctype.h>    // tolower, isdigit
+#include <time.h>     // time (để xáo trộn ngẫu nhiên)
+
+#ifdef _WIN32
+#include <windows.h>  // để bật tiếng Việt + màu trên Windows
+#endif
+
+/* ---------- 1. HẰNG SỐ ---------- */
+#define MAX_TU       500    // tối đa 500 từ trong từ điển
+#define MAX_YEUTHICH 500
+#define MAX_LICHSU   50     // lịch sử giữ tối đa 50 từ
+#define MAX_KETQUA   30     // mỗi lần tra hiện tối đa 30 kết quả
+#define MAT_KHAU     "admin123"
+#define SO_CHU_DE    5
+
+#define FILE_TU      "tudien_words.txt"
+#define FILE_YT      "tudien_favs.txt"
+#define FILE_LS      "tudien_hist.txt"
+#define FILE_CFG     "tudien_cfg.txt"
+
+/* ---------- 2. STRUCT (gom dữ liệu liên quan vào một khối) ---------- */
+
+// Một từ vựng
+typedef struct {
+    char en[50];      // từ tiếng Anh
+    char ipa[60];     // phiên âm
+    char pos[30];     // loại từ (danh từ, động từ...)
+    char vi[100];     // nghĩa tiếng Việt
+    char ex[160];     // câu ví dụ tiếng Anh
+    char exVi[160];   // dịch câu ví dụ
+    char topic[20];   // chủ đề
+} Word;
+
+// Bảng màu cho giao diện sáng / tối
+typedef struct {
+    const char *chinh;  // màu chủ đạo (tiêu đề, từ khóa)
+    const char *phu;    // màu chữ phụ (xám)
+    const char *tot;    // màu "đúng"
+    const char *xau;    // màu "sai"
+} GiaoDien;
+
+// Toàn bộ trạng thái của chương trình
+typedef struct {
+    Word words[MAX_TU];                 // danh sách từ
+    int  soTu;                          // số từ hiện có
+
+    char favs[MAX_YEUTHICH][50];        // từ yêu thích (viết thường)
+    int  soFav;
+
+    char hist[MAX_LICHSU][50];          // lịch sử tra cứu
+    int  soHist;
+
+    int  huongViEn;                     // 0: Anh->Việt, 1: Việt->Anh
+    int  chuDe;                         // -1: tất cả, 0..4: chủ đề
+    int  toi;                           // 1: giao diện tối, 0: sáng
+    int  isAdmin;                       // 1: đã đăng nhập quản trị
+} App;
+
+/* ---------- 3. DỮ LIỆU CÓ SẴN ---------- */
+
+static const char *CHU_DE[SO_CHU_DE] = {
+    "Cơ bản", "Công nghệ", "Kinh tế", "Khoa học", "Đời sống"
+};
+
+static const Word SEED[] = {
+    {"hello","/həˈləʊ/","thán từ","xin chào","Hello, how are you?","Xin chào, bạn khỏe không?","Cơ bản"},
+    {"goodbye","/ɡʊdˈbaɪ/","thán từ","tạm biệt","Goodbye, see you tomorrow.","Tạm biệt, hẹn mai gặp lại.","Cơ bản"},
+    {"thank you","/ˈθæŋk juː/","cụm từ","cảm ơn","Thank you for your help.","Cảm ơn bạn đã giúp đỡ.","Cơ bản"},
+    {"love","/lʌv/","danh từ","tình yêu; tình thương","Love is patient and kind.","Tình yêu thì kiên nhẫn và tử tế.","Cơ bản"},
+    {"love","/lʌv/","động từ","yêu; thích","I love music.","Tôi yêu âm nhạc.","Cơ bản"},
+    {"book","/bʊk/","danh từ","quyển sách","She is reading a book.","Cô ấy đang đọc một quyển sách.","Cơ bản"},
+    {"water","/ˈwɔːtər/","danh từ","nước","Please drink more water.","Hãy uống nhiều nước hơn.","Cơ bản"},
+    {"food","/fuːd/","danh từ","thức ăn; đồ ăn","Vietnamese food is delicious.","Đồ ăn Việt Nam rất ngon.","Cơ bản"},
+    {"house","/haʊs/","danh từ","ngôi nhà","They bought a new house.","Họ đã mua một ngôi nhà mới.","Cơ bản"},
+    {"family","/ˈfæməli/","danh từ","gia đình","My family lives in Hanoi.","Gia đình tôi sống ở Hà Nội.","Cơ bản"},
+    {"friend","/frend/","danh từ","bạn bè","He is my best friend.","Anh ấy là bạn thân nhất của tôi.","Cơ bản"},
+    {"school","/skuːl/","danh từ","trường học","The school opens at seven.","Trường học mở cửa lúc bảy giờ.","Cơ bản"},
+    {"teacher","/ˈtiːtʃər/","danh từ","giáo viên","Our teacher is very kind.","Giáo viên của chúng tôi rất tốt bụng.","Cơ bản"},
+    {"student","/ˈstjuːdnt/","danh từ","học sinh; sinh viên","Every student has a laptop.","Mỗi sinh viên đều có một máy tính xách tay.","Cơ bản"},
+    {"learn","/lɜːn/","động từ","học; học hỏi","I want to learn English.","Tôi muốn học tiếng Anh.","Cơ bản"},
+    {"study","/ˈstʌdi/","động từ","học tập; nghiên cứu","She studies every night.","Cô ấy học mỗi tối.","Cơ bản"},
+    {"work","/wɜːk/","động từ","làm việc","He works at a bank.","Anh ấy làm việc ở ngân hàng.","Cơ bản"},
+    {"eat","/iːt/","động từ","ăn","We eat dinner at six.","Chúng tôi ăn tối lúc sáu giờ.","Cơ bản"},
+    {"drink","/drɪŋk/","động từ","uống","Do you drink coffee?","Bạn có uống cà phê không?","Cơ bản"},
+    {"sleep","/sliːp/","động từ","ngủ","The baby is sleeping.","Em bé đang ngủ.","Cơ bản"},
+    {"algorithm","/ˈælɡərɪðəm/","danh từ","thuật toán","This sorting algorithm is very efficient.","Thuật toán sắp xếp này rất hiệu quả.","Công nghệ"},
+    {"bandwidth","/ˈbændwɪdθ/","danh từ","băng thông","Our internet bandwidth was upgraded.","Băng thông mạng của chúng tôi đã được nâng cấp.","Công nghệ"},
+    {"browser","/ˈbraʊzər/","danh từ","trình duyệt web","Chrome is a popular web browser.","Chrome là một trình duyệt web phổ biến.","Công nghệ"},
+    {"cloud","/klaʊd/","danh từ","điện toán đám mây","We store all our files in the cloud.","Chúng tôi lưu trữ tất cả tệp trên đám mây.","Công nghệ"},
+    {"compiler","/kəmˈpaɪlər/","danh từ","trình biên dịch","The compiler reported three errors.","Trình biên dịch đã báo cáo ba lỗi.","Công nghệ"},
+    {"encryption","/ɪnˈkrɪpʃn/","danh từ","mã hóa","Data encryption ensures user privacy.","Mã hóa dữ liệu đảm bảo quyền riêng tư.","Công nghệ"},
+    {"firewall","/ˈfaɪərwɔːl/","danh từ","tường lửa","The firewall blocked suspicious traffic.","Tường lửa đã chặn lưu lượng đáng ngờ.","Công nghệ"},
+    {"framework","/ˈfreɪmwɜːk/","danh từ","khung phần mềm","React is a popular JavaScript framework.","React là một framework phổ biến.","Công nghệ"},
+    {"economy","/ɪˈkɒnəmi/","danh từ","nền kinh tế","The global economy is recovering.","Nền kinh tế toàn cầu đang hồi phục.","Kinh tế"},
+    {"inflation","/ɪnˈfleɪʃn/","danh từ","lạm phát","High inflation reduces purchasing power.","Lạm phát cao làm giảm sức mua.","Kinh tế"},
+    {"investment","/ɪnˈvestmənt/","danh từ","sự đầu tư","Real estate is a safe investment.","Bất động sản là một khoản đầu tư an toàn.","Kinh tế"},
+    {"marketing","/ˈmɑːkɪtɪŋ/","danh từ","tiếp thị","Digital marketing requires creativity.","Tiếp thị kỹ thuật số đòi hỏi sự sáng tạo.","Kinh tế"},
+    {"adaptation","/ˌædæpˈteɪʃn/","danh từ","sự thích nghi","Adaptation is key to survival.","Sự thích nghi là chìa khóa để sinh tồn.","Khoa học"},
+    {"atmosphere","/ˈætməsfɪər/","danh từ","bầu khí quyển","Pollution damages the atmosphere.","Ô nhiễm làm tổn hại bầu khí quyển.","Khoa học"},
+    {"biodiversity","/ˌbaɪəʊdaɪˈvɜːsəti/","danh từ","đa dạng sinh học","Forests host rich biodiversity.","Rừng chứa đựng sự đa dạng sinh học.","Khoa học"},
+    {"ability","/əˈbɪləti/","danh từ","khả năng","She has the ability to learn fast.","Cô ấy có khả năng học nhanh.","Đời sống"},
+    {"accident","/ˈæksɪdənt/","danh từ","tai nạn","He was hurt in a car accident.","Anh ấy bị thương trong một vụ tai nạn.","Đời sống"},
+    {"achieve","/əˈtʃiːv/","động từ","đạt được","Work hard to achieve your goals.","Hãy làm việc chăm chỉ để đạt mục tiêu.","Đời sống"}
+};
+#define SO_SEED ((int)(sizeof(SEED) / sizeof(SEED[0])))
+
+static const GiaoDien MAU_TOI  = {"\033[96m", "\033[90m", "\033[92m", "\033[91m"};
+static const GiaoDien MAU_SANG = {"\033[34m", "\033[90m", "\033[32m", "\033[31m"};
+#define RESET "\033[0m"
+#define DAM   "\033[1m"
+
+/* ---------- 4. BIẾN TOÀN CỤC ---------- */
+static App app;                   // một biến duy nhất giữ toàn bộ trạng thái
+static const GiaoDien *mau;       // bảng màu đang dùng
+
+/* ============================================================
+ *  PHẦN A: HÀM TIỆN ÍCH
+ * ============================================================ */
+
+// Lưu chuỗi an toàn (không bao giờ tràn bộ nhớ)
+void sao_chep(char *dich, const char *nguon, int kichThuoc) {
+    snprintf(dich, kichThuoc, "%s", nguon);
+}
+
+// Đọc một dòng từ bàn phím, bỏ ký tự xuống dòng
+void doc_dong(char *buf, int n) {
+    if (!fgets(buf, n, stdin)) {      // hết dữ liệu nhập -> thoát chương trình
+        printf("\n");
+        exit(0);
+    }
+    int len = (int)strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+        buf[--len] = '\0';
+    }
+    for (int i = 0; i < len; i++) {   // '|' dùng để ngăn cách trong file nên đổi thành khoảng trắng
+        if (buf[i] == '|') buf[i] = ' ';
+    }
+}
+
+// Đọc một số nguyên. Nhập sai hoặc để trống thì trả về -1
+int doc_so(void) {
+    char buf[32];
+    doc_dong(buf, sizeof(buf));
+    if (!isdigit((unsigned char)buf[0])) return -1;
+    return atoi(buf);
+}
+
+void nhan_enter(void) {
+    char buf[8];
+    printf("%s(Nhấn Enter để tiếp tục)%s", mau->phu, RESET);
+    doc_dong(buf, sizeof(buf));
+}
+
+void xoa_man_hinh(void) {
+    printf("\033[2J\033[H");
+}
+
+// Hỏi có/không. Trả về 1 nếu người dùng gõ y hoặc c
+int hoi_co_khong(const char *cauHoi) {
+    char buf[16];
+    printf("%s (y/n): ", cauHoi);
+    doc_dong(buf, sizeof(buf));
+    return (buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 'c' || buf[0] == 'C');
+}
+
+// So sánh 2 chuỗi không phân biệt hoa thường
+int so_sanh_khong_hoa_thuong(const char *a, const char *b) {
+    while (*a && *b) {
+        int x = tolower((unsigned char)*a);
+        int y = tolower((unsigned char)*b);
+        if (x != y) return x - y;
+        a++;
+        b++;
+    }
+    return tolower((unsigned char)*a) - tolower((unsigned char)*b);
+}
+
+// Đổi sang chữ thường
+void viet_thuong(const char *nguon, char *dich, int n) {
+    int i = 0;
+    for (; nguon[i] && i < n - 1; i++) dich[i] = (char)tolower((unsigned char)nguon[i]);
+    dich[i] = '\0';
+}
+
+/* ----- Bỏ dấu tiếng Việt (để gõ "tinh yeu" vẫn tìm ra "tình yêu") -----
+ * Mỗi nhóm gồm các chữ có dấu và chữ gốc của chúng.
+ * Chữ tiếng Việt dùng UTF-8 nên mỗi chữ có thể chiếm 2-3 byte. */
+typedef struct {
+    const char *chuoi;   // các chữ có dấu thuộc nhóm
+    char goc;            // chữ không dấu tương ứng
+} NhomDau;
+
+static const NhomDau BANG_DAU[] = {
+    {"àáảãạăằắẳẵặâầấẩẫậÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬ", 'a'},
+    {"èéẻẽẹêềếểễệÈÉẺẼẸÊỀẾỂỄỆ", 'e'},
+    {"ìíỉĩịÌÍỈĨỊ", 'i'},
+    {"òóỏõọôồốổỗộơờớởỡợÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢ", 'o'},
+    {"ùúủũụưừứửữựÙÚỦŨỤƯỪỨỬỮỰ", 'u'},
+    {"ỳýỷỹỵỲÝỶỸỴ", 'y'},
+    {"đĐ", 'd'}
+};
+#define SO_NHOM ((int)(sizeof(BANG_DAU) / sizeof(BANG_DAU[0])))
+
+// Một ký tự UTF-8 chiếm bao nhiêu byte? (nhìn byte đầu tiên)
+int do_dai_utf8(unsigned char c) {
+    if (c < 0x80) return 1;
+    if ((c >> 5) == 0x6) return 2;
+    if ((c >> 4) == 0xE) return 3;
+    if ((c >> 3) == 0x1E) return 4;
+    return 1;
+}
+
+// Tìm chữ gốc của ký tự UTF-8 dài `len` byte tại vị trí p. Không có thì trả 0.
+char tim_chu_goc(const char *p, int len) {
+    for (int g = 0; g < SO_NHOM; g++) {
+        const char *s = BANG_DAU[g].chuoi;
+        while (*s) {
+            int l = do_dai_utf8((unsigned char)*s);
+            if (l == len && memcmp(s, p, len) == 0) return BANG_DAU[g].goc;
+            s += l;
+        }
+    }
+    return 0;
+}
+
+// Chuẩn hóa: chữ thường + bỏ dấu + cắt khoảng trắng 2 đầu
+void chuan_hoa(const char *nguon, char *dich, int n) {
+    char tam[300];
+    int k = 0;
+    const char *p = nguon;
+    while (*p && k < (int)sizeof(tam) - 1) {
+        int len = do_dai_utf8((unsigned char)*p);
+        char goc = (len > 1) ? tim_chu_goc(p, len) : 0;
+        if (goc) {
+            tam[k++] = goc;
+        } else if (len == 1) {
+            tam[k++] = (char)tolower((unsigned char)*p);
+        } else {                                   // ký tự lạ: giữ nguyên
+            for (int i = 0; i < len && k < (int)sizeof(tam) - 1; i++) tam[k++] = p[i];
+        }
+        p += len;
+    }
+    tam[k] = '\0';
+
+    int dau = 0, cuoi = k - 1;                     // cắt khoảng trắng
+    while (tam[dau] == ' ') dau++;
+    while (cuoi >= dau && tam[cuoi] == ' ') cuoi--;
+    int j = 0;
+    for (int i = dau; i <= cuoi && j < n - 1; i++) dich[j++] = tam[i];
+    dich[j] = '\0';
+}
+
+/* ----- Đọc phát âm (dùng chương trình có sẵn của hệ điều hành) ----- */
+void phat_am(const char *text, int tiengViet) {
+    char sach[200];
+    int n = 0;
+    for (int i = 0; text[i] && n < (int)sizeof(sach) - 1; i++) {
+        char c = text[i];
+        if (strchr("'\"\\`$&;|<>%()", c)) continue;   // bỏ ký tự nguy hiểm cho lệnh
+        sach[n++] = c;
+    }
+    sach[n] = '\0';
+
+    char lenh[600];
+#ifdef _WIN32
+    snprintf(lenh, sizeof(lenh),
+        "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Speech; "
+        "(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('%s')\"", sach);
+#elif defined(__APPLE__)
+    snprintf(lenh, sizeof(lenh), "say %s \"%s\"", tiengViet ? "-v Linh" : "", sach);
+#else
+    snprintf(lenh, sizeof(lenh), "espeak -v %s \"%s\" 2>/dev/null", tiengViet ? "vi" : "en", sach);
+#endif
+    if (system(lenh) != 0) {
+        printf("%sMáy chưa hỗ trợ đọc phát âm (Linux cần cài espeak).%s\n", mau->xau, RESET);
+    }
+}
+
+/* ============================================================
+ *  PHẦN B: LƯU / ĐỌC FILE
+ * ============================================================ */
+
+void luu_tu(void) {
+    FILE *f = fopen(FILE_TU, "w");
+    if (!f) return;
+    for (int i = 0; i < app.soTu; i++) {
+        Word *w = &app.words[i];
+        fprintf(f, "%s|%s|%s|%s|%s|%s|%s\n", w->en, w->ipa, w->pos, w->vi, w->ex, w->exVi, w->topic);
+    }
+    fclose(f);
+}
+
+void luu_yeu_thich(void) {
+    FILE *f = fopen(FILE_YT, "w");
+    if (!f) return;
+    for (int i = 0; i < app.soFav; i++) fprintf(f, "%s\n", app.favs[i]);
+    fclose(f);
+}
+
+void luu_lich_su(void) {
+    FILE *f = fopen(FILE_LS, "w");
+    if (!f) return;
+    for (int i = 0; i < app.soHist; i++) fprintf(f, "%s\n", app.hist[i]);
+    fclose(f);
+}
+
+void luu_giao_dien(void) {
+    FILE *f = fopen(FILE_CFG, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", app.toi);
+    fclose(f);
+}
+
+void khoi_phuc_tu_goc(void) {
+    app.soTu = SO_SEED;
+    for (int i = 0; i < SO_SEED; i++) app.words[i] = SEED[i];
+    luu_tu();
+}
+
+// Cắt một dòng "a|b|c" thành các phần. Trả về số phần tách được.
+int tach_dong(char *dong, char *phan[], int toiDa) {
+    int n = 0;
+    char *p = dong;
+    phan[n++] = p;
+    while (*p && n < toiDa) {
+        if (*p == '|') {
+            *p = '\0';
+            phan[n++] = p + 1;
+        }
+        p++;
+    }
+    return n;
+}
+
+void doc_tu_tu_file(void) {
+    app.soTu = 0;
+    FILE *f = fopen(FILE_TU, "r");
+    if (f) {
+        char dong[1024];
+        while (app.soTu < MAX_TU && fgets(dong, sizeof(dong), f)) {
+            int len = (int)strlen(dong);
+            while (len > 0 && (dong[len - 1] == '\n' || dong[len - 1] == '\r')) dong[--len] = '\0';
+            char *p[7];
+            if (tach_dong(dong, p, 7) < 7) continue;       // dòng hỏng thì bỏ qua
+            Word *w = &app.words[app.soTu++];
+            sao_chep(w->en,    p[0], sizeof(w->en));
+            sao_chep(w->ipa,   p[1], sizeof(w->ipa));
+            sao_chep(w->pos,   p[2], sizeof(w->pos));
+            sao_chep(w->vi,    p[3], sizeof(w->vi));
+            sao_chep(w->ex,    p[4], sizeof(w->ex));
+            sao_chep(w->exVi,  p[5], sizeof(w->exVi));
+            sao_chep(w->topic, p[6], sizeof(w->topic));
+        }
+        fclose(f);
+    }
+    if (app.soTu == 0) khoi_phuc_tu_goc();                 // chưa có file -> dùng dữ liệu gốc
+}
+
+void doc_danh_sach_chuoi(const char *tenFile, char ds[][50], int *dem, int toiDa) {
+    *dem = 0;
+    FILE *f = fopen(tenFile, "r");
+    if (!f) return;
+    char dong[200];
+    while (*dem < toiDa && fgets(dong, sizeof(dong), f)) {
+        int len = (int)strlen(dong);
+        while (len > 0 && (dong[len - 1] == '\n' || dong[len - 1] == '\r')) dong[--len] = '\0';
+        if (len > 0) sao_chep(ds[(*dem)++], dong, 50);
+    }
+    fclose(f);
+}
+
+void doc_giao_dien(void) {
+    app.toi = 0;
+    FILE *f = fopen(FILE_CFG, "r");
+    if (!f) return;
+    if (fscanf(f, "%d", &app.toi) != 1) app.toi = 0;
+    fclose(f);
+}
+
+void ap_dung_giao_dien(void) {
+    mau = app.toi ? &MAU_TOI : &MAU_SANG;
+    luu_giao_dien();
+}
+
+/* ============================================================
+ *  PHẦN C: HÀM XỬ LÝ DỮ LIỆU (chủ đề, yêu thích, lịch sử, tìm kiếm)
+ * ============================================================ */
+
+// Từ w có thuộc chủ đề đang chọn không?
+int trong_chu_de(const Word *w) {
+    if (app.chuDe < 0) return 1;
+    return strcmp(w->topic, CHU_DE[app.chuDe]) == 0;
+}
+
+int dem_tu_trong_chu_de(void) {
+    int dem = 0;
+    for (int i = 0; i < app.soTu; i++) if (trong_chu_de(&app.words[i])) dem++;
+    return dem;
+}
+
+const char *ten_chu_de(void) {
+    return app.chuDe < 0 ? "Tất cả" : CHU_DE[app.chuDe];
+}
+
+// Trộn ngẫu nhiên một mảng số nguyên (thuật toán Fisher-Yates)
+void xao_tron(int *mang, int n) {
+    for (int i = n - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        int tam = mang[i];
+        mang[i] = mang[j];
+        mang[j] = tam;
+    }
+}
+
+/* ----- Yêu thích ----- */
+int tim_yeu_thich(const char *en) {          // trả về vị trí, hoặc -1 nếu chưa có
+    char k[50];
+    viet_thuong(en, k, sizeof(k));
+    for (int i = 0; i < app.soFav; i++) if (strcmp(app.favs[i], k) == 0) return i;
+    return -1;
+}
+
+void them_yeu_thich(const char *en) {
+    if (tim_yeu_thich(en) >= 0 || app.soFav >= MAX_YEUTHICH) return;
+    for (int i = app.soFav; i > 0; i--) strcpy(app.favs[i], app.favs[i - 1]);   // chèn vào đầu
+    viet_thuong(en, app.favs[0], 50);
+    app.soFav++;
+    luu_yeu_thich();
+}
+
+void bo_yeu_thich(const char *en) {
+    int vt = tim_yeu_thich(en);
+    if (vt < 0) return;
+    for (int i = vt; i < app.soFav - 1; i++) strcpy(app.favs[i], app.favs[i + 1]);
+    app.soFav--;
+    luu_yeu_thich();
+}
+
+/* ----- Lịch sử ----- */
+void them_lich_su(const char *en) {
+    int vt = -1;                                         // đã có trong lịch sử chưa?
+    for (int i = 0; i < app.soHist; i++) if (strcmp(app.hist[i], en) == 0) vt = i;
+    if (vt >= 0) {                                       // có rồi -> xóa bản cũ
+        for (int i = vt; i < app.soHist - 1; i++) strcpy(app.hist[i], app.hist[i + 1]);
+        app.soHist--;
+    }
+    if (app.soHist >= MAX_LICHSU) app.soHist = MAX_LICHSU - 1;
+    for (int i = app.soHist; i > 0; i--) strcpy(app.hist[i], app.hist[i - 1]);
+    sao_chep(app.hist[0], en, 50);
+    app.soHist++;
+    luu_lich_su();
+}
+
+/* ----- Tìm kiếm -----
+ * Điểm: 0 = trùng khớp hoàn toàn, 1 = bắt đầu bằng, 2 = có chứa, 9 = không khớp
+ * Kết quả (vị trí các từ) xếp vào mảng kq, đã sắp theo điểm. Trả về số kết quả. */
+int tim_kiem(const char *tuKhoa, int kq[]) {
+    static int diem[MAX_TU];
+    char n[300], k[300];
+    chuan_hoa(tuKhoa, n, sizeof(n));
+
+    int dem = 0;
+    for (int i = 0; i < app.soTu; i++) {
+        Word *w = &app.words[i];
+        if (!trong_chu_de(w)) continue;
+        chuan_hoa(app.huongViEn ? w->vi : w->en, k, sizeof(k));
+
+        int d = 9;
+        if (strcmp(k, n) == 0) d = 0;
+        else if (strncmp(k, n, strlen(n)) == 0) d = 1;
+        else if (strstr(k, n) != NULL) d = 2;
+
+        if (d < 9) {
+            kq[dem] = i;
+            diem[dem] = d;
+            dem++;
+        }
+    }
+
+    // Sắp xếp nổi bọt: điểm nhỏ lên trước, bằng điểm thì theo thứ tự chữ cái
+    for (int a = 0; a < dem - 1; a++) {
+        for (int b = 0; b < dem - 1 - a; b++) {
+            int doiCho = 0;
+            if (diem[b] > diem[b + 1]) doiCho = 1;
+            else if (diem[b] == diem[b + 1] &&
+                     so_sanh_khong_hoa_thuong(app.words[kq[b]].en, app.words[kq[b + 1]].en) > 0) doiCho = 1;
+            if (doiCho) {
+                int t = kq[b]; kq[b] = kq[b + 1]; kq[b + 1] = t;
+                t = diem[b]; diem[b] = diem[b + 1]; diem[b + 1] = t;
+            }
+        }
+    }
+    return dem;
+}
+
+/* ============================================================
+ *  PHẦN D: CÁC MÀN HÌNH
+ * ============================================================ */
+
+void in_tieu_de(const char *tieuDe) {
+    xoa_man_hinh();
+    printf("%s%s=== %s ===%s\n", mau->chinh, DAM, tieuDe, RESET);
+    printf("%sChiều: %s | Chủ đề: %s | Giao diện: %s%s\n\n", mau->phu,
+           app.huongViEn ? "VI -> EN" : "EN -> VI", ten_chu_de(),
+           app.toi ? "tối" : "sáng", RESET);
+}
+
+/* ---------- Chi tiết một từ ---------- */
+void man_hinh_chi_tiet(int idx) {
+    Word w = app.words[idx];
+    them_lich_su(w.en);
+
+    while (1) {
+        in_tieu_de("CHI TIẾT TỪ");
+        int yt = (tim_yeu_thich(w.en) >= 0);
+        printf("%s%s%s%s  [%s]  %s\n", mau->chinh, DAM, w.en, RESET, w.topic, yt ? "❤️  đã lưu" : "🤍");
+        printf("%s%s%s\n", mau->phu, w.ipa, RESET);
+        printf("--------------------------------------\n");
+
+        // In tất cả nghĩa của cùng một từ (ví dụ "love" vừa danh từ vừa động từ)
+        for (int j = 0; j < app.soTu; j++) {
+            Word *g = &app.words[j];
+            if (so_sanh_khong_hoa_thuong(g->en, w.en) != 0) continue;
+            printf("%s%s%s\n", mau->chinh, g->pos, RESET);
+            printf("  %s%s%s\n", DAM, g->vi, RESET);
+            if (g->ex[0]) {
+                printf("  \"%s\"\n", g->ex);
+                printf("  %s%s%s\n", mau->phu, g->exVi, RESET);
+            }
+            printf("\n");
+        }
+
+        printf("1. Đọc tiếng Anh   2. %s   3. Đọc nghĩa tiếng Việt   0. Quay lại\n",
+               yt ? "Bỏ lưu" : "Lưu yêu thích");
+        printf("Chọn: ");
+        int c = doc_so();
+        if (c == 0) return;
+        if (c == 1) phat_am(w.en, 0);
+        if (c == 3) phat_am(w.vi, 1);
+        if (c == 2) {
+            if (yt) { bo_yeu_thich(w.en); printf("Đã bỏ lưu từ vựng.\n"); }
+            else    { them_yeu_thich(w.en); printf("Đã lưu từ vựng.\n"); }
+            nhan_enter();
+        }
+        if (c == 1 || c == 3) nhan_enter();
+    }
+}
+
+/* ---------- 1. Tra từ ---------- */
+void man_hinh_tra_tu(const char *tuKhoiDau) {
+    char q[100];
+    sao_chep(q, tuKhoiDau, sizeof(q));
+
+    while (1) {
+        if (q[0] == '\0') {                        // chưa có từ khóa -> hỏi
+            in_tieu_de("TRA TỪ");
+            printf("📖 Đang có %d từ vựng khả dụng.\n", dem_tu_trong_chu_de());
+            printf("Nhập từ cần tra (%s, Enter để quay lại): ",
+                   app.huongViEn ? "tiếng Việt" : "tiếng Anh");
+            doc_dong(q, sizeof(q));
+            if (q[0] == '\0') return;
+        }
+
+        int kq[MAX_TU];
+        int soKq = tim_kiem(q, kq);
+        if (soKq > MAX_KETQUA) soKq = MAX_KETQUA;
+
+        in_tieu_de("KẾT QUẢ TRA CỨU");
+        if (soKq == 0) {
+            printf("%s🔍 Không tìm thấy từ \"%s\"%s\n", mau->xau, q, RESET);
+            printf("Thử đổi từ khóa hoặc đổi chiều từ điển.\n\n");
+            q[0] = '\0';
+            nhan_enter();
+            continue;
+        }
+
+        for (int i = 0; i < soKq; i++) {
+            Word *w = &app.words[kq[i]];
+            printf("%2d. %s%s%s %s%s%s  ->  %s%s%s  %s[%s]%s\n", i + 1,
+                   DAM, app.huongViEn ? w->vi : w->en, RESET,
+                   mau->phu, w->ipa, RESET,
+                   mau->chinh, app.huongViEn ? w->en : w->vi, RESET,
+                   mau->phu, w->topic, RESET);
+        }
+        printf("\nChọn số để xem chi tiết (0 = tra từ khác): ");
+        int c = doc_so();
+        q[0] = '\0';                               // lần sau hỏi từ khóa mới
+        if (c >= 1 && c <= soKq) man_hinh_chi_tiet(kq[c - 1]);
+    }
+}
+
+/* ---------- 2. Thẻ từ (flashcard) ---------- */
+#define MAX_THE (MAX_TU * 20)
+
+void man_hinh_flashcard(void) {
+    static int ds[MAX_THE];     // danh sách thẻ (lưu vị trí từ)
+    int soThe = 0;
+    int idx = 0;                // đang ở thẻ thứ mấy
+    int lat = 0;                // 0: mặt trước, 1: mặt sau
+
+    // Tạo bộ thẻ: lấy các từ trong chủ đề rồi xáo trộn
+    for (int i = 0; i < app.soTu; i++) if (trong_chu_de(&app.words[i])) ds[soThe++] = i;
+    if (soThe == 0) {
+        in_tieu_de("THẺ TỪ");
+        printf("Không có từ vựng nào trong chủ đề này.\n");
+        nhan_enter();
+        return;
+    }
+    xao_tron(ds, soThe);
+
+    while (1) {
+        in_tieu_de("THẺ TỪ");
+
+        if (idx >= soThe) {                        // hết thẻ
+            printf("🎉 Hoàn thành Flashcard! Bạn đã ôn xong chủ đề này.\n\n");
+            printf("1. Học lại từ đầu   0. Thoát\nChọn: ");
+            if (doc_so() == 1) {
+                soThe = 0;
+                for (int i = 0; i < app.soTu; i++) if (trong_chu_de(&app.words[i])) ds[soThe++] = i;
+                xao_tron(ds, soThe);
+                idx = 0;
+                lat = 0;
+                continue;
+            }
+            return;
+        }
+
+        Word *w = &app.words[ds[idx]];
+        printf("%sThẻ %d / %d (%s)%s\n\n", mau->phu, idx + 1, soThe, w->topic, RESET);
+        printf("+------------------------------------------+\n");
+        if (!lat) {                                // mặt trước
+            printf("   %s%s%s%s\n", mau->chinh, DAM, w->en, RESET);
+            printf("   %s%s%s\n", mau->phu, w->ipa, RESET);
+            printf("   (Chọn 1 để lật xem nghĩa)\n");
+        } else {                                   // mặt sau
+            printf("   %s%s%s\n", mau->phu, w->pos, RESET);
+            printf("   %s%s%s%s\n", mau->chinh, DAM, w->vi, RESET);
+            if (w->ex[0]) printf("   \"%s\"\n", w->ex);
+        }
+        printf("+------------------------------------------+\n\n");
+
+        printf("1. Lật thẻ  2. Chưa thuộc  3. Đã thuộc  4. Đọc  5. Xáo trộn  0. Thoát\nChọn: ");
+        int c = doc_so();
+        if (c == 0) return;
+        if (c == 1) lat = !lat;
+        if (c == 2) {                              // chưa thuộc -> đưa thẻ xuống cuối để ôn lại
+            if (soThe < MAX_THE) ds[soThe++] = ds[idx];
+            idx++;
+            lat = 0;
+        }
+        if (c == 3) { idx++; lat = 0; }            // đã thuộc -> qua thẻ khác
+        if (c == 4) { phat_am(w->en, 0); nhan_enter(); }
+        if (c == 5) {                              // xáo trộn lại từ đầu
+            soThe = 0;
+            for (int i = 0; i < app.soTu; i++) if (trong_chu_de(&app.words[i])) ds[soThe++] = i;
+            xao_tron(ds, soThe);
+            idx = 0;
+            lat = 0;
+        }
+    }
+}
+
+/* ---------- 3. Đố vui ---------- */
+void man_hinh_quiz(void) {
+    int ds[MAX_TU];
+    int soCauHoi = 0;
+    for (int i = 0; i < app.soTu; i++) if (trong_chu_de(&app.words[i])) ds[soCauHoi++] = i;
+
+    if (soCauHoi < 4) {
+        in_tieu_de("ĐỐ VUI");
+        printf("Cần ít nhất 4 từ vựng trong chủ đề này để làm đố vui.\n");
+        nhan_enter();
+        return;
+    }
+
+    while (1) {
+        xao_tron(ds, soCauHoi);
+        if (soCauHoi > 10) soCauHoi = 10;          // mỗi lượt tối đa 10 câu
+        int diem = 0;
+
+        for (int cau = 0; cau < soCauHoi; cau++) {
+            int dung = ds[cau];                    // vị trí từ cần hỏi
+            int opt[4];                            // 4 đáp án (vị trí các từ)
+            opt[0] = dung;
+            int dem = 1;
+            while (dem < 4) {                      // chọn 3 đáp án nhiễu, không trùng nhau
+                int r = rand() % app.soTu;
+                int trung = 0;
+                for (int k = 0; k < dem; k++) if (opt[k] == r) trung = 1;
+                if (!trung) opt[dem++] = r;
+            }
+            xao_tron(opt, 4);
+
+            in_tieu_de("ĐỐ VUI");
+            printf("Câu %d / %d          Điểm: %s%d%s\n\n", cau + 1, soCauHoi, mau->chinh, diem, RESET);
+            printf("Nghĩa của từ này là gì?\n");
+            printf("  %s%s%s%s  %s%s%s\n\n", mau->chinh, DAM, app.words[dung].en, RESET,
+                   mau->phu, app.words[dung].ipa, RESET);
+            for (int k = 0; k < 4; k++) {
+                printf("  %c. %s %s(%s)%s\n", 'A' + k, app.words[opt[k]].vi,
+                       mau->phu, app.words[opt[k]].pos, RESET);
+            }
+
+            int chon = -1;
+            while (chon < 0) {                     // nhập A-D cho đến khi hợp lệ
+                char buf[16];
+                printf("\nĐáp án của bạn (A/B/C/D): ");
+                doc_dong(buf, sizeof(buf));
+                char ch = (char)toupper((unsigned char)buf[0]);
+                if (ch >= 'A' && ch <= 'D') chon = ch - 'A';
+            }
+
+            if (opt[chon] == dung) {
+                printf("%s✅ Chính xác!%s\n", mau->tot, RESET);
+                diem++;
+            } else {
+                printf("%s❌ Sai rồi.%s Đáp án đúng: %s%s%s\n", mau->xau, RESET, DAM, app.words[dung].vi, RESET);
+            }
+            nhan_enter();
+        }
+
+        in_tieu_de("KẾT QUẢ TRẮC NGHIỆM");
+        printf("🏆 Đúng %s%d / %d%s câu\n\n", mau->chinh, diem, soCauHoi, RESET);
+        printf("1. Thử lại lượt mới   0. Thoát\nChọn: ");
+        if (doc_so() != 1) return;
+
+        soCauHoi = 0;                              // tạo lại danh sách câu hỏi cho lượt mới
+        for (int i = 0; i < app.soTu; i++) if (trong_chu_de(&app.words[i])) ds[soCauHoi++] = i;
+    }
+}
+
+/* ---------- 4. Đã lưu ---------- */
+void man_hinh_yeu_thich(void) {
+    while (1) {
+        in_tieu_de("TỪ VỰNG ĐÃ LƯU");
+        printf("❤️  %d từ\n\n", app.soFav);
+
+        int ds[MAX_TU], dem = 0;
+        for (int i = 0; i < app.soTu; i++) {
+            if (tim_yeu_thich(app.words[i].en) >= 0) ds[dem++] = i;
+        }
+        if (dem == 0) {
+            printf("Chưa có từ vựng nào được yêu thích.\n");
+            nhan_enter();
+            return;
+        }
+        for (int i = 0; i < dem; i++) {
+            Word *w = &app.words[ds[i]];
+            printf("%2d. %s%s%s %s%s%s - %s\n", i + 1, mau->chinh, w->en, RESET, mau->phu, w->ipa, RESET, w->vi);
+        }
+        printf("\nNhập số để BỎ LƯU từ đó (0 = quay lại): ");
+        int c = doc_so();
+        if (c < 1 || c > dem) return;
+        bo_yeu_thich(app.words[ds[c - 1]].en);
+        printf("Đã bỏ lưu.\n");
+        nhan_enter();
+    }
+}
+
+/* ---------- 5. Lịch sử ---------- */
+void man_hinh_lich_su(void) {
+    while (1) {
+        in_tieu_de("LỊCH SỬ TRA CỨU");
+        if (app.soHist == 0) {
+            printf("Lịch sử tra cứu trống.\n");
+            nhan_enter();
+            return;
+        }
+        for (int i = 0; i < app.soHist; i++) printf("%2d. %s\n", i + 1, app.hist[i]);
+
+        printf("\nNhập số để tra lại | X = xóa lịch sử | 0 = quay lại: ");
+        char buf[16];
+        doc_dong(buf, sizeof(buf));
+        if (buf[0] == 'x' || buf[0] == 'X') {
+            app.soHist = 0;
+            luu_lich_su();
+            printf("Đã xóa lịch sử.\n");
+            nhan_enter();
+            return;
+        }
+        int c = isdigit((unsigned char)buf[0]) ? atoi(buf) : 0;
+        if (c < 1 || c > app.soHist) return;
+        char tu[50];
+        sao_chep(tu, app.hist[c - 1], sizeof(tu));
+        man_hinh_tra_tu(tu);                       // tra lại từ đó
+    }
+}
+
+/* ---------- 6. Quản trị ---------- */
+void admin_them_tu(void) {
+    if (app.soTu >= MAX_TU) {
+        printf("%sDanh sách đã đầy!%s\n", mau->xau, RESET);
+        nhan_enter();
+        return;
+    }
+    Word w;
+    char buf[200];
+
+    printf("Từ tiếng Anh: ");        doc_dong(w.en, sizeof(w.en));
+    printf("Nghĩa tiếng Việt: ");    doc_dong(w.vi, sizeof(w.vi));
+    if (w.en[0] == '\0' || w.vi[0] == '\0') {
+        printf("%sVui lòng nhập từ EN và nghĩa VI.%s\n", mau->xau, RESET);
+        nhan_enter();
+        return;
+    }
+    printf("Phiên âm /IPA/ (Enter = bỏ qua): ");   doc_dong(buf, sizeof(buf));
+    sao_chep(w.ipa, buf[0] ? buf : "/.../", sizeof(w.ipa));
+    printf("Loại từ (Enter = danh từ): ");         doc_dong(buf, sizeof(buf));
+    sao_chep(w.pos, buf[0] ? buf : "danh từ", sizeof(w.pos));
+    printf("Ví dụ tiếng Anh (Enter = bỏ qua): ");  doc_dong(w.ex, sizeof(w.ex));
+    printf("Dịch ví dụ (Enter = bỏ qua): ");       doc_dong(w.exVi, sizeof(w.exVi));
+
+    printf("Chủ đề:\n");
+    for (int i = 0; i < SO_CHU_DE; i++) printf("  %d. %s\n", i + 1, CHU_DE[i]);
+    printf("Chọn chủ đề (Enter = Cơ bản): ");
+    int c = doc_so();
+    if (c < 1 || c > SO_CHU_DE) c = 1;
+    sao_chep(w.topic, CHU_DE[c - 1], sizeof(w.topic));
+
+    for (int i = app.soTu; i > 0; i--) app.words[i] = app.words[i - 1];   // chèn vào đầu danh sách
+    app.words[0] = w;
+    app.soTu++;
+    luu_tu();
+    printf("%sĐã thêm từ mới!%s\n", mau->tot, RESET);
+    nhan_enter();
+}
+
+void admin_xoa_tu(void) {
+    while (1) {
+        in_tieu_de("DANH SÁCH TỪ VỰNG");
+        for (int i = 0; i < app.soTu; i++) {
+            printf("%3d. %s%s%s (%s) - %s\n", i + 1, DAM, app.words[i].en, RESET, app.words[i].pos, app.words[i].vi);
+        }
+        printf("\nNhập số để XÓA từ đó (0 = quay lại): ");
+        int c = doc_so();
+        if (c < 1 || c > app.soTu) return;
+        for (int i = c - 1; i < app.soTu - 1; i++) app.words[i] = app.words[i + 1];
+        app.soTu--;
+        luu_tu();
+        printf("Đã xóa từ vựng.\n");
+        nhan_enter();
+    }
+}
+
+void man_hinh_quan_tri(void) {
+    // Chưa đăng nhập -> hỏi mật khẩu
+    if (!app.isAdmin) {
+        in_tieu_de("ĐĂNG NHẬP QUẢN TRỊ");
+        char mk[50];
+        printf("🔐 Nhập mật khẩu: ");
+        doc_dong(mk, sizeof(mk));
+        if (strcmp(mk, MAT_KHAU) != 0) {
+            printf("%sMật khẩu không đúng.%s\n", mau->xau, RESET);
+            nhan_enter();
+            return;
+        }
+        app.isAdmin = 1;
+    }
+
+    while (1) {
+        in_tieu_de("QUẢN LÝ TỪ VỰNG");
+        printf("Hiện có %d từ.\n\n", app.soTu);
+        printf("1. Thêm từ mới\n2. Xem danh sách / xóa từ\n3. Khôi phục từ vựng gốc\n4. Đăng xuất\n0. Quay lại\nChọn: ");
+        int c = doc_so();
+        if (c == 0) return;
+        if (c == 1) admin_them_tu();
+        if (c == 2) admin_xoa_tu();
+        if (c == 3 && hoi_co_khong("Khôi phục danh sách từ vựng ban đầu?")) {
+            khoi_phuc_tu_goc();
+            printf("Đã khôi phục dữ liệu gốc.\n");
+            nhan_enter();
+        }
+        if (c == 4) {
+            app.isAdmin = 0;
+            return;
+        }
+    }
+}
+
+/* ---------- Chọn chủ đề ---------- */
+void chon_chu_de(void) {
+    in_tieu_de("CHỌN CHỦ ĐỀ");
+    printf("0. Tất cả\n");
+    for (int i = 0; i < SO_CHU_DE; i++) printf("%d. %s\n", i + 1, CHU_DE[i]);
+    printf("Chọn: ");
+    int c = doc_so();
+    if (c >= 0 && c <= SO_CHU_DE) app.chuDe = c - 1;    // c = 0 -> -1 (tất cả)
+}
+
+/* ============================================================
+ *  PHẦN E: HÀM MAIN
+ * ============================================================ */
+int main(void) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);                        // hiện được tiếng Việt
+    SetConsoleCP(CP_UTF8);
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);         // bật màu ANSI
+    DWORD mode = 0;
+    GetConsoleMode(h, &mode);
+    SetConsoleMode(h, mode | 0x0004);
+#endif
+    srand((unsigned)time(NULL));
+
+    // Khởi tạo trạng thái
+    app.huongViEn = 0;
+    app.chuDe = -1;
+    app.isAdmin = 0;
+    doc_tu_tu_file();
+    doc_danh_sach_chuoi(FILE_YT, app.favs, &app.soFav, MAX_YEUTHICH);
+    doc_danh_sach_chuoi(FILE_LS, app.hist, &app.soHist, MAX_LICHSU);
+    doc_giao_dien();
+    ap_dung_giao_dien();
+
+    // Vòng lặp menu chính
+    while (1) {
+        in_tieu_de("TỪ ĐIỂN ANH - VIỆT");
+        printf("1. 🔍 Tra từ\n");
+        printf("2. 📇 Thẻ từ (flashcard)\n");
+        printf("3. 🧩 Đố vui\n");
+        printf("4. ❤️  Đã lưu (%d)\n", app.soFav);
+        printf("5. 🕘 Lịch sử (%d)\n", app.soHist);
+        printf("6. ⚙️  Quản trị\n");
+        printf("7. ⇄  Đổi chiều tra (hiện: %s)\n", app.huongViEn ? "VI -> EN" : "EN -> VI");
+        printf("8. 🏷️  Chọn chủ đề (hiện: %s)\n", ten_chu_de());
+        printf("9. 🌙 Đổi giao diện sáng / tối\n");
+        printf("0. Thoát\n");
+        printf("\nChọn: ");
+
+        int c = doc_so();
+        if (c == 0) break;
+        else if (c == 1) man_hinh_tra_tu("");
+        else if (c == 2) man_hinh_flashcard();
+        else if (c == 3) man_hinh_quiz();
+        else if (c == 4) man_hinh_yeu_thich();
+        else if (c == 5) man_hinh_lich_su();
+        else if (c == 6) man_hinh_quan_tri();
+        else if (c == 7) app.huongViEn = !app.huongViEn;
+        else if (c == 8) chon_chu_de();
+        else if (c == 9) { app.toi = !app.toi; ap_dung_giao_dien(); }
+    }
+
+    printf("Tạm biệt! 👋\n");
+    return 0;
+}
