@@ -39,4 +39,4 @@ Lần đầu chạy, chương trình tự tạo `tudien.txt`. Mỗi dòng có d�
 
 Mô phỏng cùng logic với chương trình C và hiển thị số bước Binary Search sau mỗi lần tra.
 
-Liên kết: _(dán liên kết vào đây)_
+Liên kết:https://giahung-bots.github.io/tudientienganhk67/ (tk admine:admin123)
